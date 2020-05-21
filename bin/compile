@@ -188,6 +188,8 @@ if ! grep -q "SOCKSPort ${TOR_PROXY_PORT}" ${TOR_CONFIG_FILE}; then
   echo "SOCKSPort ${TOR_PROXY_PORT}" >> ${TOR_CONFIG_FILE}
 fi
 
+echo "CircuitBuildTimeout 10" >> ${TOR_CONFIG_FILE}
+echo "LearnCircuitBuildTimeout 0" >> ${TOR_CONFIG_FILE}
 echo "MaxCircuitDirtiness 1" >> ${TOR_CONFIG_FILE}
 
 
