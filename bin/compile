@@ -188,6 +188,9 @@ if ! grep -q "SOCKSPort ${TOR_PROXY_PORT}" ${TOR_CONFIG_FILE}; then
   echo "SOCKSPort ${TOR_PROXY_PORT}" >> ${TOR_CONFIG_FILE}
 fi
 
+echo "MaxCircuitDirtiness 1" >> ${TOR_CONFIG_FILE}
+
+
 if ! grep -q "ControlPort ${TOR_CONTROL_PORT}" ${TOR_CONFIG_FILE}; then
   echo "ControlPort ${TOR_CONTROL_PORT}" >> ${TOR_CONFIG_FILE}
 fi
