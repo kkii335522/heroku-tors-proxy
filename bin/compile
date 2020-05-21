@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+################################################################################
+# Essentials
+################################################################################
+
+set -x
+
+HEROKU_BUILD_DIR="$1"
+HEROKU_CACHE_DIR="$2"
+HEROKU_ENV_DIR="$3"
+
+HEROKU_THIS_DIR=$(dirname "$0")
+HEROKU_PACK_DIR=$(
+    # shellcheck disable=SC2164
+    cd "$HEROKU_THIS_DIR"
+    cd ..
+    pwd
+)
+
+# Essental functions
+
+echo_extra() {
+    echo "-----> $*" | indent
+}
+
+export_env_vars() {
+    env_dir=$1
+    whitelist_regex=${2:-''}
+    blacklist_regex=${3:-'^(PATH|GIT_DIR|CPATH|CPPATH|LD_PRELOAD|LIBRARY_PATH)$'}
+
+    if [ -d "$env_dir" ]; then
+        # shellcheck disable=SC2045
+        for e in $(ls "$env_dir"); do
+            # shellcheck disable=SC2086
+            echo "$e" | grep -E "$whitelist_regex" | grep -qvE "$blacklist_regex" && export "$e=$(cat $env_dir/$e)"
+            :
+        done
+    fi
+}
+
+indent() {
+    sed -u 's/^/      /'
+}
+
+# Load env variables
+
+export_env_vars "$HEROKU_ENV_DIR"
+
+################################################################################
+# Variables
+################################################################################
+
+TOR_COMMAND="run_tor_proxy"
+TOR_CONFIG_FILE="${HOME}/tor/etc/tor/torrc"
+TOR_DIST_URL="https://dist.torproject.org/"
+
+if [ -z "$TOR_VERSION" ]; then
+    TOR_SRCH=".\..\..\..\.tar"
+    TOR_PACKAGE=$(curl -s "$TOR_DIST_URL" | grep -o -e "$TOR_SRCH" | sort | tail -1)
+    TOR_VERSION="${TOR_PACKAGE/.tar/}"
+fi
+
+TOR_SRC_NAME="tor-${TOR_VERSION}.tar.gz"
+
+if [ -z "$TOR_PROXY_PORT" ]; then
+    TOR_PROXY_PORT="9050"
+fi
+
+if [ -z "$TOR_CONTROL_PORT" ]; then
+    TOR_CONTROL_PORT="9051"
+fi
+
+if [ -z "$TOR_CONTROL_PASS" ]; then
+    TOR_CONTROL_PASS="torProxy@123"
+fi
+
+TOR_SIG_NAME=${TOR_SRC_NAME}.asc
+TOR_SRC_URL=${TOR_DIST_URL}${TOR_SRC_NAME}
+TOR_SRC_SIG_URL=${TOR_DIST_URL}${TOR_SIG_NAME}
+
+################################################################################
+# Check Cache
+################################################################################
+
+mkdir -p "$HEROKU_CACHE_DIR"
+grep -wq "${TOR_SRC_NAME}" "${HEROKU_CACHE_DIR}/tor_version.txt"
+
+# shellcheck disable=SC2181
+if [ $? -eq 0 ]; then
+    IS_TOR_CACHED=1
+else
+    IS_TOR_CACHED=0
+fi
+
+################################################################################
+# Download Tor
+################################################################################
+
+if [ $IS_TOR_CACHED -eq 0 ]; then
+    echo "Downloading ${TOR_SRC_URL}"
+    wget -q "$TOR_SRC_URL"
+
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+        echo_extra "FAILED to obtain ${TOR_SRC_URL}"
+        exit 1
+    fi
+
+    echo "Downloading ${TOR_SRC_SIG_URL}"
+    wget -q "$TOR_SRC_SIG_URL"
+
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+        echo_extra "FAILED to obtain signature ${TOR_SRC_SIG_URL}"
+        exit 1
+    fi
+fi
+
+################################################################################
+# Check Integrity
+################################################################################
+
+if [ $IS_TOR_CACHED -eq 0 ]; then
+    gpg --keyserver pool.sks-keyservers.net --recv-keys 0x4E2C6E8793298290
+    gpg --keyserver pool.sks-keyservers.net --recv-keys 0x6AFEE6D49E92B601
+    gpg --verify "$TOR_SIG_NAME" "$TOR_SRC_NAME" | grep -c "Good signature"
+
+    if [ $? -lt 1 ]; then
+        echo_extra "FAILED to verify the signature"
+        exit 1
+    fi
+fi
+
+################################################################################
+# Compile Tor
+################################################################################
+
+if [ $IS_TOR_CACHED -eq 0 ]; then
+    tar -zxf "$TOR_SRC_NAME"
+    cd "tor-${TOR_VERSION}" || echo "FAILED to configure Tor"
+
+    ./configure --prefix="${HEROKU_CACHE_DIR}/tor"
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+        echo_extra "FAILED to configure for compiling Tor"
+        exit 1
+    fi
+
+    make install
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+        echo_extra "FAILED to compile Tor"
+        exit 1
+    fi
+fi
+
+################################################################################
+# Install Tor
+################################################################################
+
+# Get the build from the cache
+cp -r "${HEROKU_CACHE_DIR}/tor" "$HEROKU_BUILD_DIR"
+
+# Save the version compiled now
+echo "$TOR_SRC_NAME" >"${HEROKU_CACHE_DIR}/tor_version.txt"
+
+################################################################################
+# Configure Tor
+################################################################################
+
+echo_extra "Configuring Tor Proxy"
+
+TOR_HASHED_PASS=$("${HEROKU_BUILD_DIR}/tor/bin/tor" --hash-password "$TOR_CONTROL_PASS")
+
+if [ -n "$TOR_CONF_FILE_URL" ]; then
+    wget "$TOR_CONF_FILE_URL" -O "${HEROKU_BUILD_DIR}/tor/etc/tor/torrc_custom"
+
+    TOR_CONFIG_FILE="${TOR_CONFIG_FILE}_custom"
+fi
+
+cat >>"${HEROKU_BUILD_DIR}/tor/bin/${TOR_COMMAND}" <<EOF
+#!/usr/bin/env bash
+
+echo "Writing the configuration file"
+
+if ! grep -q "SOCKSPort ${TOR_PROXY_PORT}" ${TOR_CONFIG_FILE}; then
+  echo "SOCKSPort ${TOR_PROXY_PORT}" >> ${TOR_CONFIG_FILE}
+fi
+
+if ! grep -q "ControlPort ${TOR_CONTROL_PORT}" ${TOR_CONFIG_FILE}; then
+  echo "ControlPort ${TOR_CONTROL_PORT}" >> ${TOR_CONFIG_FILE}
+fi
+
+if ! grep -q "HashedControlPassword ${TOR_HASHED_PASS}" ${TOR_CONFIG_FILE}; then
+  echo "HashedControlPassword ${TOR_HASHED_PASS}" >> ${TOR_CONFIG_FILE}
+fi
+
+echo "Launching the program: Tor Proxy"
+
+"${HOME}/tor/bin/tor" -f ${TOR_CONFIG_FILE} &
+exec \$*
+EOF
+
+chmod a+x "${HEROKU_BUILD_DIR}/tor/bin/${TOR_COMMAND}"
+
+################################################################################
+# Activate Runner
+################################################################################
+
+echo_extra "Activating the auto-runner"
+
+if [ ! -d "${HEROKU_BUILD_DIR}/.profile.d/" ]; then
+    mkdir "${HEROKU_BUILD_DIR}/.profile.d/"
+fi
+
+cp "${HEROKU_PACK_DIR}/extra/${TOR_COMMAND}.sh" "${HEROKU_BUILD_DIR}/.profile.d/"
+chmod +x "${HEROKU_BUILD_DIR}/.profile.d/${TOR_COMMAND}.sh"
+
+echo_extra "SUCCESS at installing Tor Proxy"
